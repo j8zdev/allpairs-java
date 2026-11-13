@@ -183,7 +183,7 @@ class ComputedAndConditionalTest {
     }
 
     @Test
-    void conditionalValuesFollowTheFirstMatchingCondition() {
+    void conditionalValuesFollowTheMatchingCondition() {
         ConditionalValues bar = bar();
         assertEquals(Arrays.asList("A", "B", "C", "D", "E", "F", null), bar.values());
 
@@ -282,5 +282,28 @@ class ComputedAndConditionalTest {
                         value + " with p11=" + p11);
             }
         }
+    }
+
+    @Test
+    void valuesOfAllMatchingConditionsAreAllowed() {
+        ConditionalValues x =
+                ConditionalValues.builder("x")
+                        .when(List.of("a"), r -> i(r, "a") >= 2, List.of("p", "q"))
+                        .when(List.of("a"), r -> i(r, "a") >= 3, List.of("q", "r"))
+                        .otherwise(List.of("z"))
+                        .build();
+        assertEquals(List.of("p", "q", "r", "z"), x.values());
+        Map<Integer, Set<String>> expected =
+                Map.of(1, Set.of("z"), 2, Set.of("p", "q"), 3, Set.of("p", "q", "r"));
+        Constraint constraint = x.constraint();
+        expected.forEach(
+                (a, allowed) -> {
+                    for (Object value : x.values()) {
+                        assertEquals(
+                                allowed.contains(value),
+                                constraint.test(Map.of("a", a, "x", value)),
+                                a + "/" + value);
+                    }
+                });
     }
 }

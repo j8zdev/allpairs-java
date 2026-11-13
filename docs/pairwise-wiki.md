@@ -76,8 +76,8 @@ wenn foo < 1:  bar ist einer von C, D, E, F
 sonst:         bar ist leer
 ```
 
-- Es gilt die **erste** zutreffende Zeile. Die Bedingungen sollten sich nicht überschneiden;
-  geprüft wird das nicht.
+- Treffen mehrere Zeilen zu, sind die Werte **aller** zutreffenden Zeilen erlaubt. Die
+  Reihenfolge der Zeilen spielt keine Rolle.
 - Trifft keine Zeile zu, ist der Parameter in diesem Testfall leer, außer es gibt eine letzte
   Zeile ohne Bedingung („sonst“).
 - Die Wertelisten selbst sind fest; nur die Bedingungen sind Ausdrücke.

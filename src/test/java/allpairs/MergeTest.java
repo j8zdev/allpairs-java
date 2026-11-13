@@ -33,7 +33,7 @@ class MergeTest {
     }
 
     @Test
-    void mergedConditionalValuesAllowWhatEitherDefinitionAllows() {
+    void mergedConditionalValuesAllowTheValuesOfAllMatchingConditions() {
         ConditionalValues foo =
                 ConditionalValues.builder("x")
                         .when(List.of("a"), row -> i(row, "a") == 1, List.of("p", "q"))
@@ -88,7 +88,7 @@ class MergeTest {
     }
 
     @Test
-    void mergedConditionalValuesAreNeverNullIfOneDefinitionHasOtherwise() {
+    void mergedOtherwiseAppliesOnlyIfNoConditionMatches() {
         ConditionalValues foo =
                 ConditionalValues.builder("x")
                         .when(List.of("a"), row -> i(row, "a") == 1, List.of("p"))
@@ -99,12 +99,12 @@ class MergeTest {
                         .otherwise(List.of("z"))
                         .build();
         assertEquals(List.of("p", "r", "z"), foo.merge(bar).values());
-        assertEquals(List.of("r", "z", "p"), bar.merge(foo).values());
+        assertEquals(List.of("r", "p", "z"), bar.merge(foo).values());
 
         Constraint constraint = foo.merge(bar).constraint();
-        // a == 1: foo allows p, bar falls back to its otherwise
+        // a == 1: foo's condition matches, so bar's otherwise does not apply
         assertTrue(constraint.test(Map.of("a", 1, "x", "p")));
-        assertTrue(constraint.test(Map.of("a", 1, "x", "z")));
+        assertFalse(constraint.test(Map.of("a", 1, "x", "z")));
         assertFalse(constraint.test(Map.of("a", 1, "x", "r")));
         assertTrue(constraint.test(Map.of("a", 2, "x", "r")));
         assertFalse(constraint.test(Map.of("a", 2, "x", "z")));
@@ -113,6 +113,14 @@ class MergeTest {
         nullRow.put("a", 3);
         nullRow.put("x", null);
         assertFalse(constraint.test(nullRow));
+
+        // the otherwise values of both definitions add up
+        ConditionalValues baz = ConditionalValues.builder("x").otherwise(List.of("y", "z")).build();
+        Constraint both = bar.merge(baz).constraint();
+        assertEquals(List.of("r", "z", "y"), bar.merge(baz).values());
+        assertTrue(both.test(Map.of("a", 3, "x", "y")));
+        assertTrue(both.test(Map.of("a", 3, "x", "z")));
+        assertFalse(both.test(Map.of("a", 2, "x", "y")));
     }
 
     @Test

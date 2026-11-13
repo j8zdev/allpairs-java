@@ -199,8 +199,9 @@ public final class Expressions {
     }
 
     /**
-     * Ein generierter Parameter, der die Werte der ersten Zeile annehmen kann, deren Bedingung
-     * zutrifft, und null ist, wenn keine zutrifft. Definitionen aus mehreren Quellen lassen
+     * Ein generierter Parameter, der die Werte aller Zeilen annehmen kann, deren Bedingung
+     * zutrifft. Trifft keine zu, gelten die Werte der Zeile ohne Bedingung; ohne eine solche
+     * Zeile ist er dann null. Definitionen aus mehreren Quellen lassen
      * sich mit {@link ConditionalValues#merge} zusammenführen.
      *
      * @throws ExpressionException wenn eine Bedingung fehlerhaft ist

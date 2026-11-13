@@ -25,10 +25,10 @@ import java.util.function.Predicate;
  * constraints.add(bar.constraint());
  * }</pre>
  *
- * <p>Die erste zutreffende Bedingung bestimmt, welche Werte erlaubt sind. Trifft keine zu,
- * gelten die mit {@link Builder#otherwise} angegebenen Werte; ohne {@code otherwise} ist der
- * Parameter in solchen Testfällen {@code null}. Dass höchstens eine Bedingung zutrifft, wird
- * nicht geprüft.
+ * <p>Erlaubt sind die Werte aller zutreffenden Bedingungen zusammen; die Reihenfolge der
+ * Bedingungen spielt keine Rolle. Trifft keine zu, gelten die mit {@link Builder#otherwise}
+ * angegebenen Werte; ohne {@code otherwise} ist der Parameter in solchen Testfällen {@code
+ * null}.
  *
  * <p>Für den Generator ist dies ein gewöhnlicher Parameter mit allen Werten, die vorkommen
  * können, und dazu ein Constraint, der den Wert an die Bedingungen bindet. Beides muss dem
@@ -57,39 +57,18 @@ public final class ConditionalValues {
         }
     }
 
-    /** Eine in sich geschlossene Definition: Die erste zutreffende Bedingung gilt. */
-    private static final class Definition {
-        final List<Branch> branches;
-        /** Die Werte, die gelten, wenn keine Bedingung zutrifft; null, wenn dann keine gelten. */
-        final Set<Object> otherwise;
-
-        Definition(List<Branch> branches, Set<Object> otherwise) {
-            this.branches = branches;
-            this.otherwise = otherwise;
-        }
-
-        /** Die Werte, die diese Definition für {@code row} zulässt; leer, wenn sie keine nennt. */
-        Set<Object> allowedValues(Map<String, Object> row) {
-            for (Branch branch : branches) {
-                Map<String, Object> inputs = new LinkedHashMap<>();
-                for (String parameter : branch.parameters) {
-                    inputs.put(parameter, row.get(parameter));
-                }
-                if (branch.condition.test(inputs)) {
-                    return branch.values;
-                }
-            }
-            return otherwise != null ? otherwise : Collections.emptySet();
-        }
-    }
-
     private final String name;
-    /** Mehr als eine Definition nur nach {@link #merge}; erlaubt ist, was eine von ihnen zulässt. */
-    private final List<Definition> definitions;
+    private final List<Branch> branches;
+    /**
+     * Die Werte, die erlaubt sind, wenn keine Bedingung zutrifft; null, wenn der Parameter dann
+     * null ist.
+     */
+    private final Set<Object> otherwise;
 
-    private ConditionalValues(String name, List<Definition> definitions) {
+    private ConditionalValues(String name, List<Branch> branches, Set<Object> otherwise) {
         this.name = name;
-        this.definitions = definitions;
+        this.branches = branches;
+        this.otherwise = otherwise;
     }
 
     /** Beginnt die Definition der bedingten Werte des Parameters {@code name}. */
@@ -97,7 +76,7 @@ public final class ConditionalValues {
         return new Builder(Objects.requireNonNull(name, "name"));
     }
 
-    /** Sammelt die Bedingungen in der Reihenfolge, in der sie geprüft werden. */
+    /** Sammelt die Bedingungen mit ihren Werten. */
     public static final class Builder {
         private final String name;
         private final List<Branch> branches = new ArrayList<>();
@@ -112,7 +91,7 @@ public final class ConditionalValues {
          *
          * @param parameters die Namen der Parameter, von denen die Bedingung abhängt
          * @param condition wird mit genau diesen Parametern aufgerufen
-         * @param values die Werte, die erlaubt sind, wenn dies die erste zutreffende Bedingung ist
+         * @param values die Werte, die erlaubt sind, wenn die Bedingung zutrifft
          */
         public Builder when(
                 Collection<String> parameters,
@@ -135,8 +114,7 @@ public final class ConditionalValues {
 
         /** Schließt die Definition ab. */
         public ConditionalValues build() {
-            return new ConditionalValues(
-                    name, List.of(new Definition(List.copyOf(branches), otherwise)));
+            return new ConditionalValues(name, List.copyOf(branches), otherwise);
         }
 
         private static Set<Object> nonEmpty(Collection<?> values) {
@@ -156,12 +134,11 @@ public final class ConditionalValues {
      * Führt diese Definition mit einer anderen für denselben Parameter zusammen, zum Beispiel
      * mit der eines zweiten Profils.
      *
-     * <p>Jede der beiden Definitionen wird weiterhin für sich ausgewertet (erste zutreffende
-     * Bedingung, sonst {@code otherwise}). Erlaubt ist ein Wert, wenn mindestens eine der beiden
-     * ihn zulässt. Der Parameter ist nur dann {@code null}, wenn in keiner der beiden eine
-     * Bedingung zutrifft und keine ein {@code otherwise} hat. Das Ergebnis hängt, abgesehen von
-     * der Reihenfolge von {@link #values()}, nicht davon ab, welche Definition mit welcher
-     * zusammengeführt wird.
+     * <p>Das Ergebnis enthält die Bedingungen beider Definitionen. Die Werte für den Fall, dass
+     * keine Bedingung zutrifft, sind die {@code otherwise}-Werte beider Definitionen zusammen;
+     * sie gelten erst, wenn in keiner der beiden eine Bedingung zutrifft. Abgesehen von der
+     * Reihenfolge von {@link #values()} hängt das Ergebnis nicht davon ab, welche Definition mit
+     * welcher zusammengeführt wird.
      *
      * @return eine neue Definition; diese und {@code other} bleiben unverändert
      * @throws IllegalArgumentException wenn {@code other} einen anderen Parameter beschreibt
@@ -172,9 +149,19 @@ public final class ConditionalValues {
             throw new IllegalArgumentException(
                     "cannot merge conditional values of '" + name + "' and '" + other.name + "'");
         }
-        List<Definition> merged = new ArrayList<>(definitions);
-        merged.addAll(other.definitions);
-        return new ConditionalValues(name, List.copyOf(merged));
+        List<Branch> merged = new ArrayList<>(branches);
+        merged.addAll(other.branches);
+        Set<Object> mergedOtherwise = null;
+        if (otherwise != null || other.otherwise != null) {
+            mergedOtherwise = new LinkedHashSet<>();
+            if (otherwise != null) {
+                mergedOtherwise.addAll(otherwise);
+            }
+            if (other.otherwise != null) {
+                mergedOtherwise.addAll(other.otherwise);
+            }
+        }
+        return new ConditionalValues(name, List.copyOf(merged), mergedOtherwise);
     }
 
     /**
@@ -184,47 +171,48 @@ public final class ConditionalValues {
      */
     public List<Object> values() {
         Set<Object> all = new LinkedHashSet<>();
-        boolean canBeNull = true;
-        for (Definition definition : definitions) {
-            for (Branch branch : definition.branches) {
-                all.addAll(branch.values);
-            }
-            if (definition.otherwise != null) {
-                all.addAll(definition.otherwise);
-                canBeNull = false;
-            }
+        for (Branch branch : branches) {
+            all.addAll(branch.values);
         }
-        if (canBeNull) {
+        if (otherwise != null) {
+            all.addAll(otherwise);
+        } else {
             all.add(null);
         }
         return Collections.unmodifiableList(new ArrayList<>(all));
     }
 
     /**
-     * Der Constraint, der nur die Werte der ersten zutreffenden Bedingung zulässt; nach {@link
-     * #merge} die Werte, die eine der zusammengeführten Definitionen zulässt.
+     * Der Constraint, der nur die Werte der zutreffenden Bedingungen zulässt, oder die {@code
+     * otherwise}-Werte, wenn keine zutrifft.
      */
     public Constraint constraint() {
         Set<String> parameters = new LinkedHashSet<>();
         parameters.add(name);
-        for (Definition definition : definitions) {
-            for (Branch branch : definition.branches) {
-                parameters.addAll(branch.parameters);
-            }
+        for (Branch branch : branches) {
+            parameters.addAll(branch.parameters);
         }
         return Constraint.of(parameters, row -> isAllowed(row, row.get(name)));
     }
 
     private boolean isAllowed(Map<String, Object> row, Object value) {
-        boolean anyValues = false;
-        for (Definition definition : definitions) {
-            Set<Object> allowed = definition.allowedValues(row);
-            if (allowed.contains(value)) {
-                return true;
+        boolean anyMatch = false;
+        for (Branch branch : branches) {
+            Map<String, Object> inputs = new LinkedHashMap<>();
+            for (String parameter : branch.parameters) {
+                inputs.put(parameter, row.get(parameter));
             }
-            anyValues |= !allowed.isEmpty();
+            if (branch.condition.test(inputs)) {
+                if (branch.values.contains(value)) {
+                    return true;
+                }
+                anyMatch = true;
+            }
         }
-        return value == null && !anyValues;
+        if (anyMatch) {
+            return false;
+        }
+        return otherwise != null ? otherwise.contains(value) : value == null;
     }
 
     @Override
