@@ -195,7 +195,7 @@ class ParityTest {
     }
 
     private static List<Map<String, Object>> run(
-            Case c, List<Constraint> constraints, Distribution distribution) {
+            Case c, List<Constraint> constraints, Distribution<?> distribution) {
         AllPairs.Result result =
                 AllPairs.builder(c.params)
                         .constraints(constraints)

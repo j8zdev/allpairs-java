@@ -493,6 +493,208 @@ class AllPairsTest {
     }
 
     @Test
+    void preferredValueGainsRowsOfALargeParameterWhereNothingIsLost() {
+        // 6 values against parameters of 5: each value needs 5 rows, the suite has far more
+        SequencedMap<String, List<?>> parameters = new LinkedHashMap<>();
+        for (int i = 0; i < 8; i++) {
+            List<Integer> values = new ArrayList<>();
+            for (int v = 0; v < (i == 0 ? 6 : 5); v++) {
+                values.add(v);
+            }
+            parameters.put("p" + i, values);
+        }
+        List<Map<String, Object>> reference = rows(AllPairs.builder(parameters));
+        List<Map<String, Object>> rows =
+                rows(AllPairs.builder(parameters).distribution("p0", Distribution.preferred(3)));
+
+        assertEquals(pairsOf(reference), pairsOf(rows));
+        assertEquals(reference.size(), rows.size());
+        Map<Object, Integer> p0 = uses(parameters, rows, "p0");
+        assertTrue(p0.get(3) > uses(parameters, reference, "p0").get(3), p0.toString());
+        assertEquals(java.util.Collections.max(p0.values()), p0.get(3), p0.toString());
+        assertEquals(rows.size(), new HashSet<>(rows).size());
+    }
+
+    @Test
+    void preferredValueIsUsedDespiteCombinationsOnlyTheSearchFindsImpossible() {
+        SequencedMap<String, List<?>> parameters = thirtyParameters();
+        // p0 has 2 values. The constraint has too many value combinations to be checked up
+        // front, so p0=1 keeps looking as if it still had something to cover.
+        List<String> wide = List.of("p0", "p1", "p2", "p4", "p5", "p8", "p11");
+        List<Constraint> constraints =
+                List.of(
+                        Constraint.of(
+                                wide, r -> !(r.get("p0").equals(1) && r.get("p1").equals(2))));
+        List<Map<String, Object>> reference =
+                rows(AllPairs.builder(parameters).constraints(constraints));
+        List<Map<String, Object>> rows =
+                rows(
+                        AllPairs.builder(parameters)
+                                .constraints(constraints)
+                                .distribution("p0", Distribution.preferred(0)));
+
+        assertEquals(pairsOf(reference), pairsOf(rows));
+        assertEquals(reference.size(), rows.size());
+        for (Map<String, Object> row : rows) {
+            assertTrue(!(row.get("p0").equals(1) && row.get("p1").equals(2)), row.toString());
+        }
+        Map<Object, Integer> p0 = uses(parameters, rows, "p0");
+        assertTrue(p0.get(0) > rows.size() * 0.7, p0.toString());
+    }
+
+    @Test
+    void distributionCanBeAnyFunctionOfTheValueFrequencies() {
+        SequencedMap<String, List<?>> parameters = thirtyParameters();
+        List<Map<String, Object>> reference = rows(AllPairs.builder(parameters));
+        // p4 has 8 values, p3 has 3: always the largest possible value
+        List<Map<Integer, Integer>> offered = new ArrayList<>();
+        Distribution<Integer> largest =
+                frequencies -> {
+                    offered.add(frequencies);
+                    return java.util.Collections.max(frequencies.keySet());
+                };
+        List<Map<String, Object>> rows =
+                rows(AllPairs.builder(parameters).distribution("p3", largest));
+
+        assertEquals(pairsOf(reference), pairsOf(rows));
+        assertEquals(reference.size(), rows.size());
+        Map<Object, Integer> p3 = uses(parameters, rows, "p3");
+        assertTrue(p3.get(2) > rows.size() * 0.5, p3.toString());
+        assertTrue(!offered.isEmpty());
+        for (Map<Integer, Integer> frequencies : offered) {
+            assertTrue(frequencies.size() >= 2, frequencies.toString());
+            assertTrue(List.of(0, 1, 2).containsAll(frequencies.keySet()), frequencies.toString());
+            for (int frequency : frequencies.values()) {
+                assertTrue(frequency >= 0 && frequency < rows.size(), frequencies.toString());
+            }
+            assertThrows(UnsupportedOperationException.class, () -> frequencies.put(0, 0));
+        }
+    }
+
+    @Test
+    void distributionOnlyOffersValuesTheConstraintsAllow() {
+        SequencedMap<String, List<?>> parameters = thirtyParameters();
+        // p0 has 2 values; p0=1 is not allowed together with p3=0
+        List<Constraint> constraints =
+                List.of(
+                        Constraint.of(
+                                List.of("p0", "p3"),
+                                r -> !(r.get("p0").equals(1) && r.get("p3").equals(0))));
+        List<Map<String, Object>> reference =
+                rows(AllPairs.builder(parameters).constraints(constraints));
+        List<Map<String, Object>> rows =
+                rows(
+                        AllPairs.builder(parameters)
+                                .constraints(constraints)
+                                .distribution("p0", Distribution.preferred(1)));
+
+        assertEquals(pairsOf(reference), pairsOf(rows));
+        assertEquals(reference.size(), rows.size());
+        assertEquals(rows.size(), new HashSet<>(rows).size());
+        int free = 0;
+        for (Map<String, Object> row : rows) {
+            assertTrue(!(row.get("p0").equals(1) && row.get("p3").equals(0)), row.toString());
+            if (!row.get("p3").equals(0)) {
+                free++;
+            }
+        }
+        Map<Object, Integer> p0 = uses(parameters, rows, "p0");
+        assertTrue(p0.get(1) > free * 0.7, p0 + " of " + free);
+    }
+
+    @Test
+    void distributionAppliesToTheGapsFilledIntoPreviouslyTestedRows() {
+        SequencedMap<String, List<?>> before = new LinkedHashMap<>();
+        before.put("a", List.of(0, 1, 2, 3, 4, 5));
+        before.put("b", List.of(0, 1, 2, 3, 4, 5));
+        List<Map<String, Object>> previous = AllPairs.builder(before).generate().rows();
+        SequencedMap<String, List<?>> parameters = new LinkedHashMap<>(before);
+        parameters.put("flag", List.of("off", "on"));
+
+        AllPairs.Result result =
+                AllPairs.builder(parameters)
+                        .previouslyTested(previous)
+                        .distribution("flag", Distribution.preferred("on"))
+                        .generate();
+
+        assertEquals(previous.size(), result.changedCount());
+        assertEquals(0, result.generatedCount());
+        int on = 0;
+        for (AllPairs.Change change : result.changed()) {
+            // what was tested stays
+            assertEquals(change.previous().get("a"), change.row().get("a"));
+            assertEquals(change.previous().get("b"), change.row().get("b"));
+            if (change.row().get("flag").equals("on")) {
+                on++;
+            }
+        }
+        // "off" has to meet each of the 6 values of a and of b: 6 to 12 rows
+        assertTrue(on >= previous.size() - 12 && on <= previous.size() - 6, "on: " + on);
+    }
+
+    @Test
+    void weightedDistributionKeepsTheGivenRatio() {
+        SequencedMap<String, List<?>> parameters = thirtyParameters();
+        List<Map<String, Object>> reference = rows(AllPairs.builder(parameters));
+        // p0 has 2 values, p3 has 3
+        List<Map<String, Object>> rows =
+                rows(
+                        AllPairs.builder(parameters)
+                                .distribution("p0", Distribution.weighted(Map.of(0, 0.7, 1, 0.3)))
+                                .distribution("p3", Distribution.weighted(Map.of(0, 1, 2, 3))));
+
+        assertEquals(pairsOf(reference), pairsOf(rows));
+        assertEquals(reference.size(), rows.size());
+        Map<Object, Integer> p0 = uses(parameters, rows, "p0");
+        assertEquals(0.7 * rows.size(), p0.get(0), 1.0, p0.toString());
+        // p3=1 has no weight: only as often as coverage needs it, the rest 1 : 3
+        Map<Object, Integer> p3 = uses(parameters, rows, "p3");
+        assertTrue(p3.get(1) >= 8 && p3.get(1) < rows.size() * 0.2, p3.toString());
+        assertEquals(0.25 * (rows.size() - p3.get(1)), p3.get(0), 1.0, p3.toString());
+
+        // only the ratio counts
+        List<Map<String, Object>> percent =
+                rows(
+                        AllPairs.builder(parameters)
+                                .distribution("p0", Distribution.weighted(Map.of(0, 70, 1, 30)))
+                                .distribution("p3", Distribution.weighted(Map.of(0, 25, 2, 75))));
+        assertEquals(rows, percent);
+    }
+
+    @Test
+    void rejectsInvalidWeights() {
+        assertThrows(IllegalArgumentException.class, () -> Distribution.weighted(Map.of()));
+        assertThrows(IllegalArgumentException.class, () -> Distribution.weighted(Map.of(1, 0)));
+        assertThrows(IllegalArgumentException.class, () -> Distribution.weighted(Map.of(1, -1, 2, 3)));
+        assertThrows(
+                IllegalArgumentException.class, () -> Distribution.weighted(Map.of(1, Double.NaN)));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        AllPairs.builder(small())
+                                .distribution("a", Distribution.weighted(Map.of(1, 1, 99, 1)))
+                                .generate());
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        AllPairs.builder(small())
+                                .defaultDistribution(Distribution.weighted(Map.of(1, 1)))
+                                .generate());
+    }
+
+    @Test
+    void distributionMustChooseAnOfferedValue() {
+        IllegalStateException e =
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                AllPairs.builder(thirtyParameters())
+                                        .distribution("p0", frequencies -> 99)
+                                        .generate());
+        assertTrue(e.getMessage().contains("p0"), e.getMessage());
+    }
+
+    @Test
     void coversAllTriples() {
         SequencedMap<String, List<?>> parameters = new LinkedHashMap<>();
         for (int i = 0; i < 8; i++) {

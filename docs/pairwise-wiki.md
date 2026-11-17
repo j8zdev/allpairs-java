@@ -84,17 +84,26 @@ sonst:         bar ist leer
 
 ### Verteilung
 
-Nach einigen Testfällen sind alle Paare eines Wertes abgedeckt. Ab dann ist es für die Abdeckung
-egal, welchen Wert der Parameter bekommt. Das betrifft viele Stellen: In einem Beispiel mit 30
-Parametern trugen rund 40 % aller Werte nichts Neues mehr bei.
+An vielen Stellen ist es für die Abdeckung egal, welchen Wert ein Parameter in einem Testfall
+hat: Jedes Paar, das der Testfall mit diesem Wert abdeckt, ist auch durch einen anderen Testfall
+abgedeckt. Nachdem die Testfälle erzeugt sind, wird für jede solche Stelle die Verteilung des
+Parameters gefragt, welchen Wert sie bekommen soll.
 
 | Verteilung | Wirkung |
 |---|---|
-| gleichmäßig (Standard) | Es wird der bisher am seltensten verwendete Wert genommen. |
-| bevorzugter Wert | Es wird immer der angegebene Wert genommen, wenn die Wahl frei ist. |
+| gleichmäßig (Standard) | Es wird der Wert genommen, der in den wenigsten Testfällen vorkommt. |
+| bevorzugter Wert | Es wird der angegebene Wert genommen, wo immer er möglich ist. |
+| Gewichte | Die Werte werden im angegebenen Verhältnis verteilt, z. B. 70 : 30. Nur das Verhältnis zählt. |
+| eigene Funktion | Bekommt die möglichen Werte mit ihrer bisherigen Häufigkeit und wählt einen davon. |
+| keine | Die Werte bleiben, wie die Suche sie gewählt hat. |
 
-Abdeckung und Bedingungen haben immer Vorrang; die Verteilung kostet keine zusätzlichen
-Testfälle.
+- Abdeckung und Bedingungen haben immer Vorrang; die Verteilung ändert weder die Abdeckung noch
+  die Anzahl der Testfälle.
+- Werte, die aus vorhandenen Testfällen übernommen wurden, bleiben. Die Verteilung gilt für neue
+  Testfälle und für die Lücken, die in vorhandenen Testfällen gefüllt wurden.
+- Ein bevorzugter Wert wirkt bei Parametern mit wenigen Werten stark, bei den größten Parametern
+  kaum: Jeder andere Wert braucht mindestens so viele Testfälle, wie der größte der übrigen
+  Parameter Werte hat.
 
 ### Vorhandene Testfälle
 
@@ -237,7 +246,7 @@ vorhandene Testfälle mit.
 **Automatisch getestet (216 Tests):**
 
 - In 186 Fällen wird das Ergebnis mit dem der ursprünglichen Python-Bibliothek verglichen. Ohne
-  Bedingungen und mit dem alten Verteilungsverhalten sind die Testfälle für Paare identisch.
+  Bedingungen und ohne Verteilung sind die Testfälle für Paare identisch.
 - In all diesen Fällen wird durch vollständiges Durchprobieren nachgewiesen, dass genau die
   erlaubten Kombinationen vorkommen.
 - Jede der oben genannten Schreibweisen für Ausdrücke, einschließlich der Unterschiede zu

@@ -75,8 +75,9 @@ import java.util.TreeSet;
  *
  * <h2>Verteilung</h2>
  *
- * Wo der Wert eines Parameters für die Abdeckung keine Rolle mehr spielt, entscheidet seine
- * {@link Distribution}: gleichmäßig verteilte Werte (Standard) oder ein bevorzugter Wert.
+ * Wo der Wert eines Parameters in einem Testfall für die Abdeckung keine Rolle spielt,
+ * entscheidet nach dem Erzeugen der Testfälle seine {@link Distribution}: gleichmäßig verteilte
+ * Werte (Standard), ein bevorzugter Wert, ein vorgegebenes Verhältnis oder eine eigene Funktion.
  *
  * <h2>Bereits getestete Testfälle</h2>
  *
@@ -155,10 +156,15 @@ public final class AllPairs {
     /** Je Parameter: seine Items in der angegebenen Reihenfolge. */
     private final List<List<Item>> itemMatrix;
     private final Map<String, Item> itemsById = new HashMap<>();
+    /**
+     * Ob die Suche unter Werten, die nichts mehr beitragen können, den am seltensten verwendeten
+     * vorzieht. Mit Constraints führt das zu deutlich weniger Testfällen; ohne Constraints bleibt
+     * es bei der Reihenfolge von allpairspy. Welchen Wert eine freie Stelle am Ende bekommt,
+     * entscheidet erst {@link #distribute}.
+     */
+    private final boolean spreadSpentValues;
     /** Je Parameter: wie freie Werte gewählt werden. */
-    private final Distribution.Kind[] distributionKinds;
-    /** Je Parameter: das bevorzugte Item, falls seine Verteilung eines hat. */
-    private final Item[] preferredItems;
+    private final List<Distribution<Object>> distributions = new ArrayList<>();
     /**
      * Id-Listen der n-stelligen Kombinationen, die bekanntermaßen durch die Constraints
      * ausgeschlossen sind.
@@ -173,6 +179,9 @@ public final class AllPairs {
     private final Set<List<String>> previousRowIds = new HashSet<>();
     /** Durchläuft nach der gierigen Phase die noch abzudeckenden Kombinationen; vorher null. */
     private CombinationCursor completion;
+
+    /** Alle Testfälle der Testsuite als Items, in der Reihenfolge, in der sie erfasst wurden. */
+    private final List<List<Item>> registeredRows = new ArrayList<>();
 
     private final List<Map<String, Object>> unchanged = new ArrayList<>();
     private final List<Change> changed = new ArrayList<>();
@@ -325,8 +334,8 @@ public final class AllPairs {
         private List<Constraint> constraints = List.of();
         private List<? extends Map<String, ?>> previouslyTested;
         private int n = 2;
-        private Distribution defaultDistribution = Distribution.balanced();
-        private final Map<String, Distribution> distributions = new LinkedHashMap<>();
+        private Distribution<?> defaultDistribution = Distribution.balanced();
+        private final Map<String, Distribution<?>> distributions = new LinkedHashMap<>();
         private List<Computed> computed = List.of();
         private List<String> passThrough = List.of();
 
@@ -388,8 +397,12 @@ public final class AllPairs {
             return this;
         }
 
-        /** Legt fest, wie freie Werte des Parameters {@code parameter} gewählt werden. */
-        public Builder distribution(String parameter, Distribution distribution) {
+        /**
+         * Legt fest, wie freie Werte des Parameters {@code parameter} gewählt werden.
+         *
+         * @param <T> der Typ der Werte des Parameters
+         */
+        public <T> Builder distribution(String parameter, Distribution<T> distribution) {
             distributions.put(
                     Objects.requireNonNull(parameter, "parameter"),
                     Objects.requireNonNull(distribution, "distribution"));
@@ -398,9 +411,10 @@ public final class AllPairs {
 
         /**
          * Legt fest, wie freie Werte bei Parametern ohne eigene Verteilung gewählt werden; ohne
-         * Angabe {@link Distribution#balanced()}. Ein bevorzugter Wert kann kein Standard sein.
+         * Angabe {@link Distribution#balanced()}. Eine Verteilung, die Werte nennt (bevorzugter
+         * Wert, Gewichte), kann kein Standard sein.
          */
-        public Builder defaultDistribution(Distribution distribution) {
+        public Builder defaultDistribution(Distribution<?> distribution) {
             this.defaultDistribution = Objects.requireNonNull(distribution, "distribution");
             return this;
         }
@@ -412,8 +426,9 @@ public final class AllPairs {
          *     Parameter, n kleiner als 1, unbekannte Parameter in Constraints, berechneten
          *     Parametern
          *     oder Verteilungen, doppelt oder zyklisch definierte berechnete Parameter, ein
-         *     bevorzugter Wert, der kein Wert des Parameters ist
+         *     bevorzugter oder gewichteter Wert, der kein Wert des Parameters ist
          * @throws IllegalStateException wenn sich ein berechneter Parameter nicht berechnen lässt
+         *     oder eine Verteilung einen Wert wählt, der ihr nicht angeboten wurde
          */
         public Result generate() {
             return new AllPairs(this).run();
@@ -490,6 +505,7 @@ public final class AllPairs {
 
         // constraints
         this.constraints = List.copyOf(builder.constraints);
+        this.spreadSpentValues = !this.constraints.isEmpty();
         this.constraintScopes = new int[this.constraints.size()][];
         List<List<Integer>> ofParameter = new ArrayList<>();
         this.component = new int[width];
@@ -532,33 +548,36 @@ public final class AllPairs {
         this.scratchRow = new Item[width];
 
         // distributions
-        if (builder.defaultDistribution.kind == Distribution.Kind.PREFERRED) {
-            throw new IllegalArgumentException("a preferred value cannot be the default distribution");
+        if (builder.defaultDistribution instanceof Distributions.Preferred
+                || builder.defaultDistribution instanceof Distributions.Weighted) {
+            throw new IllegalArgumentException(
+                    "a distribution that names values cannot be the default distribution");
         }
-        this.distributionKinds = new Distribution.Kind[width];
-        this.preferredItems = new Item[width];
-        Arrays.fill(distributionKinds, builder.defaultDistribution.kind);
-        for (Map.Entry<String, Distribution> entry : builder.distributions.entrySet()) {
+        for (int i = 0; i < width; i++) {
+            distributions.add(untyped(builder.defaultDistribution));
+        }
+        for (Map.Entry<String, Distribution<?>> entry : builder.distributions.entrySet()) {
             int index = parameterNames.indexOf(entry.getKey());
             if (index < 0) {
                 throw new IllegalArgumentException(
                         "distribution refers to unknown parameter '" + entry.getKey() + "'");
             }
-            Distribution distribution = entry.getValue();
-            distributionKinds[index] = distribution.kind;
-            if (distribution.kind == Distribution.Kind.PREFERRED) {
-                for (Item item : itemMatrix.get(index)) {
-                    if (Objects.equals(item.value, distribution.preferredValue)) {
-                        preferredItems[index] = item;
-                        break;
+            if (entry.getValue() instanceof Distributions.Preferred<?> preferred
+                    && !parameters.get(entry.getKey()).contains(preferred.value())) {
+                throw new IllegalArgumentException(
+                        "preferred value '" + preferred.value()
+                                + "' is not a value of parameter '" + entry.getKey() + "'");
+            }
+            if (entry.getValue() instanceof Distributions.Weighted<?> weighted) {
+                for (Object value : weighted.weights.keySet()) {
+                    if (!parameters.get(entry.getKey()).contains(value)) {
+                        throw new IllegalArgumentException(
+                                "weighted value '" + value + "' is not a value of parameter '"
+                                        + entry.getKey() + "'");
                     }
                 }
-                if (preferredItems[index] == null) {
-                    throw new IllegalArgumentException(
-                            "preferred value '" + distribution.preferredValue
-                                    + "' is not a value of parameter '" + entry.getKey() + "'");
-                }
             }
+            distributions.set(index, untyped(entry.getValue()));
         }
 
         propagateInitially();
@@ -571,6 +590,12 @@ public final class AllPairs {
                 addPreviouslyTested(row);
             }
         }
+    }
+
+    /** Die Werte eines Parameters haben keinen statischen Typ; die Verteilung bekommt sie, wie sie sind. */
+    @SuppressWarnings("unchecked")
+    private static Distribution<Object> untyped(Distribution<?> distribution) {
+        return (Distribution<Object>) distribution;
     }
 
     /**
@@ -628,7 +653,12 @@ public final class AllPairs {
     }
 
     private Result run() {
+        int width = itemMatrix.size();
+        List<OpenRow> openRows = new ArrayList<>();
+
         // complete the previously tested rows that have gaps
+        List<PendingRow> completedRows = new ArrayList<>();
+        List<List<Item>> completedItems = new ArrayList<>();
         while (!pendingRows.isEmpty()) {
             PendingRow pending = pendingRows.poll();
             List<Item> completed = search(pending.pinned);
@@ -638,19 +668,205 @@ public final class AllPairs {
                 dropped.add(new Dropped(pending.previous, DropReason.DUPLICATE));
             } else {
                 register(completed);
-                changed.add(new Change(pending.previous, toRow(completed, pending.previous)));
+                completedRows.add(pending);
+                completedItems.add(completed);
+                boolean[] chosen = new boolean[width];
+                for (int i = 0; i < width; i++) {
+                    chosen[i] = pending.pinned[i] == null;
+                }
+                openRows.add(new OpenRow(completed, chosen));
             }
         }
 
-        Map<String, Object> row;
+        List<List<Item>> generatedItems = new ArrayList<>();
+        List<Item> row;
         while ((row = nextGenerated()) != null) {
-            generated.add(row);
+            generatedItems.add(row);
+            boolean[] chosen = new boolean[width];
+            Arrays.fill(chosen, true);
+            openRows.add(new OpenRow(row, chosen));
+        }
+
+        distribute(openRows);
+
+        for (int i = 0; i < completedRows.size(); i++) {
+            Map<String, ?> previous = completedRows.get(i).previous;
+            changed.add(new Change(previous, toRow(completedItems.get(i), previous)));
+        }
+        for (List<Item> items : generatedItems) {
+            generated.add(toRow(items, null));
         }
         return new Result(unchanged, changed, generated, dropped);
     }
 
+    /**
+     * Ein Testfall der Testsuite mit den Stellen, deren Wert der Generator gewählt hat. Die Liste
+     * liegt auf einem Array, ihre Werte lassen sich also ersetzen.
+     */
+    private record OpenRow(List<Item> items, boolean[] chosen) {}
+
+    /**
+     * So oft wird die Testsuite höchstens durchlaufen. Eine Stelle kann erst frei werden, nachdem
+     * eine andere ihren Wert gewechselt hat; eine Verteilung, die nie zur Ruhe kommt, soll den
+     * Lauf aber nicht aufhalten.
+     */
+    private static final int MAX_DISTRIBUTION_PASSES = 8;
+
+    /**
+     * Fragt für jede freie Stelle die {@link Distribution} ihres Parameters nach dem Wert. Frei
+     * ist eine vom Generator gewählte Stelle, wenn jede Kombination, die ihr Testfall mit ihrem
+     * Wert abdeckt, auch durch einen anderen Testfall abgedeckt ist. Zur Wahl stehen die Werte,
+     * mit denen der Testfall die Constraints erfüllt und keinem anderen gleicht.
+     */
+    private void distribute(List<OpenRow> openRows) {
+        int width = itemMatrix.size();
+        boolean any = false;
+        for (Distribution<Object> distribution : distributions) {
+            any |= distribution != Distributions.NONE;
+        }
+        if (!any || openRows.isEmpty()) {
+            return;
+        }
+
+        // per combination the number of rows that cover it, per value the number that contain it
+        Map<List<String>, Integer> coverage = new HashMap<>();
+        Set<List<String>> rowIds = new HashSet<>();
+        int[][] uses = new int[width][];
+        for (int i = 0; i < width; i++) {
+            uses[i] = new int[itemMatrix.get(i).size()];
+        }
+        for (List<Item> row : registeredRows) {
+            PairsStorage.forEachCombination(row, n, key -> coverage.merge(key, 1, Integer::sum));
+            rowIds.add(ids(row));
+            for (Item item : row) {
+                uses[item.parameter][item.index]++;
+            }
+        }
+
+        boolean moved = true;
+        for (int pass = 0; moved && pass < MAX_DISTRIBUTION_PASSES; pass++) {
+            moved = false;
+            for (OpenRow open : openRows) {
+                for (int i = 0; i < width; i++) {
+                    if (open.chosen[i] && distributions.get(i) != Distributions.NONE) {
+                        moved |= redistribute(open.items, i, coverage, rowIds, uses[i]);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Lässt die Verteilung den Wert von {@code row} an der Stelle {@code i} wählen, falls er frei
+     * ist.
+     *
+     * @return ob der Wert gewechselt hat
+     */
+    private boolean redistribute(
+            List<Item> row,
+            int i,
+            Map<List<String>, Integer> coverage,
+            Set<List<String>> rowIds,
+            int[] uses) {
+        Item old = row.get(i);
+        boolean[] needed = new boolean[1];
+        forEachCombinationWith(row, i, key -> needed[0] |= coverage.get(key) < 2);
+        if (needed[0]) {
+            return false;
+        }
+
+        Map<Object, Integer> frequencies = new LinkedHashMap<>();
+        Map<Object, Item> byValue = new HashMap<>();
+        Item[] candidate = row.toArray(new Item[0]);
+        for (Item item : itemMatrix.get(i)) {
+            if (item != old) {
+                candidate[i] = item;
+                boolean possible = !rowIds.contains(ids(Arrays.asList(candidate)));
+                for (int c = 0; possible && c < constraintsOfParameter[i].length; c++) {
+                    possible = satisfies(candidate, constraintsOfParameter[i][c]);
+                }
+                if (!possible) {
+                    continue;
+                }
+            }
+            if (byValue.putIfAbsent(item.value, item) == null) {
+                frequencies.put(item.value, uses[item.index] - (item == old ? 1 : 0));
+            }
+        }
+        if (frequencies.size() < 2) {
+            return false;
+        }
+
+        Object value = distributions.get(i).choose(Collections.unmodifiableMap(frequencies));
+        Item chosen = byValue.get(value);
+        if (chosen == null) {
+            throw new IllegalStateException(
+                    "distribution of parameter '" + parameterNames.get(i) + "' chose '" + value
+                            + "', which is not one of the offered values " + frequencies.keySet());
+        }
+        if (chosen == old) {
+            return false;
+        }
+
+        forEachCombinationWith(row, i, key -> coverage.merge(key, -1, Integer::sum));
+        rowIds.remove(ids(row));
+        row.set(i, chosen);
+        forEachCombinationWith(row, i, key -> coverage.merge(key, 1, Integer::sum));
+        rowIds.add(ids(row));
+        uses[old.index]--;
+        uses[chosen.index]++;
+        return true;
+    }
+
+    /**
+     * Ruft {@code action} mit den Ids jeder n-stelligen Kombination von {@code row} auf, die die
+     * Stelle {@code position} enthält, in Parameterreihenfolge.
+     */
+    private void forEachCombinationWith(
+            List<Item> row, int position, java.util.function.Consumer<List<String>> action) {
+        int others = row.size() - 1;
+        int k = n - 1;
+        if (k > others) {
+            return;
+        }
+        // indexes into the other positions: the positions after this one are shifted by one
+        int[] idx = new int[k];
+        for (int j = 0; j < k; j++) {
+            idx[j] = j;
+        }
+        while (true) {
+            String[] ids = new String[n];
+            int w = 0;
+            boolean placed = false;
+            for (int j = 0; j < k; j++) {
+                int p = idx[j] < position ? idx[j] : idx[j] + 1;
+                if (!placed && p > position) {
+                    ids[w++] = row.get(position).id;
+                    placed = true;
+                }
+                ids[w++] = row.get(p).id;
+            }
+            if (!placed) {
+                ids[w] = row.get(position).id;
+            }
+            action.accept(List.of(ids));
+
+            int j = k - 1;
+            while (j >= 0 && idx[j] == j + others - k) {
+                j--;
+            }
+            if (j < 0) {
+                return;
+            }
+            idx[j]++;
+            for (int m = j + 1; m < k; m++) {
+                idx[m] = idx[m - 1] + 1;
+            }
+        }
+    }
+
     /** Liefert den nächsten neuen Testfall oder null, wenn alles abgedeckt ist. */
-    private Map<String, Object> nextGenerated() {
+    private List<Item> nextGenerated() {
         if (completion == null) {
             // greedy phase: rows built from scratch, as long as each covers something new
             if (isEverythingCovered()) {
@@ -663,7 +879,7 @@ public final class AllPairs {
             }
             if (countNewCombinations(chosen) > 0) {
                 register(chosen);
-                return toRow(chosen, null);
+                return chosen;
             }
             // could not find new combinations this way: cover the missing ones one by one
             completion = new CombinationCursor();
@@ -682,7 +898,7 @@ public final class AllPairs {
                 continue;
             }
             register(chosen);
-            return toRow(chosen, null);
+            return chosen;
         }
         return null;
     }
@@ -696,21 +912,24 @@ public final class AllPairs {
      * mehr verwendet.
      */
     private void register(List<Item> row) {
-        Set<List<String>> covered = pairs.getCombs().get(n - 1);
-        PairsStorage.forEachCombination(
-                row,
-                n,
-                key -> {
-                    if (!covered.contains(key)) {
-                        for (String id : key) {
-                            itemsById.get(id).remaining--;
+        if (spreadSpentValues) {
+            Set<List<String>> covered = pairs.getCombs().get(n - 1);
+            PairsStorage.forEachCombination(
+                    row,
+                    n,
+                    key -> {
+                        if (!covered.contains(key)) {
+                            for (String id : key) {
+                                itemsById.get(id).remaining--;
+                            }
                         }
-                    }
-                });
-        pairs.addSequence(row);
-        for (Item item : row) {
-            item.uses++;
+                    });
+            for (Item item : row) {
+                item.uses++;
+            }
         }
+        pairs.addSequence(row);
+        registeredRows.add(row);
     }
 
     private int countNewCombinations(List<Item> row) {
@@ -1227,8 +1446,7 @@ public final class AllPairs {
                 candidateRow.add(current[i]);
             }
         }
-        Distribution.Kind distribution = distributionKinds[num];
-        boolean hasPolicy = distribution != Distribution.Kind.NONE;
+        boolean spread = spreadSpentValues;
 
         for (Item item : workingItemMatrix.get(num)) {
             Node dataNode = pairs.getNodeInfo(item);
@@ -1253,20 +1471,13 @@ public final class AllPairs {
                 newCombs[k] = count[0];
             }
 
-            int[] weights = new int[n + (hasPolicy ? 4 : 3)];
+            int[] weights = new int[n + (spread ? 4 : 3)];
             int w = 0;
             // the node that creates most of new pairs is the best
             weights[w++] = -newCombs[n - 1];
-            if (hasPolicy) {
-                // Values that can still contribute go first. Among the free ones the
-                // distribution decides: the least used, or the preferred one.
-                if (item.remaining > 0) {
-                    weights[w++] = -1;
-                } else if (distribution == Distribution.Kind.BALANCED) {
-                    weights[w++] = item.uses;
-                } else {
-                    weights[w++] = item == preferredItems[num] ? 0 : 1;
-                }
+            if (spread) {
+                // Values that can still contribute go first; among the others the least used.
+                weights[w++] = item.remaining > 0 ? -1 : item.uses;
             }
             // less used outbound connections most likely to produce more new pairs while search
             // continues

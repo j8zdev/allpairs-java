@@ -8,11 +8,15 @@ final class Item {
     int parameter;
     int index;
     int[] weights = new int[0];
-    /** Anzahl der Testfälle (bereits getestete und erzeugte), die diesen Wert enthalten. */
+    /**
+     * Nur für die Suche mit Constraints geführt: Anzahl der Testfälle (bereits getestete und
+     * erzeugte), die diesen Wert während der Suche enthalten.
+     */
     int uses;
     /**
-     * Anzahl der n-stelligen Kombinationen mit diesem Wert, die weder abgedeckt noch als durch
-     * die Constraints ausgeschlossen bekannt sind. Bei null kann der Wert nichts mehr beitragen.
+     * Nur für die Suche mit Constraints geführt: Anzahl der n-stelligen Kombinationen mit diesem
+     * Wert, die weder abgedeckt noch als durch die Constraints ausgeschlossen bekannt sind. Bei
+     * null kann der Wert nichts mehr beitragen.
      */
     long remaining;
 
