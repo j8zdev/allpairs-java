@@ -152,9 +152,9 @@ public final class AllPairs {
     private final List<String> parameterNames;
     private final long maxUniquePairsExpected;
     /** Je Parameter: seine Items, vor jeder Wahl eines Werts neu sortiert, das beste zuerst. */
-    private final List<List<Item>> workingItemMatrix;
+    private final List<List<Item>> workingItemMatrix = new ArrayList<>();
     /** Je Parameter: seine Items in der angegebenen Reihenfolge. */
-    private final List<List<Item>> itemMatrix;
+    private final List<List<Item>> itemMatrix = new ArrayList<>();
     private final Map<String, Item> itemsById = new HashMap<>();
     /**
      * Ob die Suche unter Werten, die nichts mehr beitragen können, den am seltensten verwendeten
@@ -438,15 +438,7 @@ public final class AllPairs {
     private AllPairs(Builder builder) {
         SequencedMap<String, ? extends List<?>> parameters = builder.parameters;
         this.n = builder.n;
-        if (n < 1) {
-            throw new IllegalArgumentException("n must be at least 1");
-        }
-        for (List<?> values : parameters.values()) {
-            if (values == null || values.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "each parameter arrays must have at least one item");
-            }
-        }
+        checkParameters(parameters, n);
 
         this.parameterNames =
                 Collections.unmodifiableList(new ArrayList<>(parameters.keySet()));
@@ -456,30 +448,86 @@ public final class AllPairs {
         }
         this.pairs = new PairsStorage(n);
 
-        // computed parameters
         this.computed = List.copyOf(builder.computed);
+        this.passThrough = builder.passThrough;
+        Map<String, Set<Integer>> computedScopes = indexComputed();
+
+        long[] sizes = createItems(parameters);
+        this.maxUniquePairsExpected = sumOfProducts(sizes, -1, n);
+        for (int i = 0; i < width; i++) {
+            // combinations of this value with n - 1 values of other parameters
+            long combinations = sumOfProducts(sizes, i, n - 1);
+            for (Item item : itemMatrix.get(i)) {
+                item.remaining = combinations;
+            }
+        }
+
+        this.constraints = List.copyOf(builder.constraints);
+        this.spreadSpentValues = !this.constraints.isEmpty();
+        this.constraintScopes = new int[this.constraints.size()][];
+        this.component = new int[width];
+        this.constraintsOfParameter = indexConstraints(computedScopes);
+        this.scratchRow = new Item[width];
+
+        resolveDistributions(builder);
+
+        propagateInitially();
+        findImpossibleCombinations();
+
+        if (builder.previouslyTested != null) {
+            // Rows that are still complete are registered first, so that the rows that need
+            // completing are filled with values that complement all of them.
+            for (Map<String, ?> row : builder.previouslyTested) {
+                addPreviouslyTested(row);
+            }
+        }
+    }
+
+    private static void checkParameters(Map<String, ? extends List<?>> parameters, int n) {
+        if (n < 1) {
+            throw new IllegalArgumentException("n must be at least 1");
+        }
+        for (List<?> values : parameters.values()) {
+            if (values == null || values.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "each parameter arrays must have at least one item");
+            }
+        }
+    }
+
+    /**
+     * Prüft die berechneten Parameter und die übernommenen Angaben und füllt {@link
+     * #computedByName}.
+     *
+     * @return je berechnetem Parameter die generierten Parameter, von denen er abhängt
+     */
+    private Map<String, Set<Integer>> indexComputed() {
         for (Computed c : computed) {
             if (parameterIndex.containsKey(c.name()) || computedByName.put(c.name(), c) != null) {
                 throw new IllegalArgumentException(
                         "computed parameter '" + c.name() + "' is defined more than once");
             }
         }
-        this.passThrough = builder.passThrough;
         for (String name : passThrough) {
             if (parameterIndex.containsKey(name) || computedByName.containsKey(name)) {
                 throw new IllegalArgumentException(
                         "pass-through name '" + name + "' is also a parameter");
             }
         }
-        Map<String, Set<Integer>> computedScopes = new HashMap<>();
+        Map<String, Set<Integer>> scopes = new HashMap<>();
         for (Computed c : computed) {
-            resolveScope(c.name(), computedScopes, new ArrayList<>());
+            resolveScope(c.name(), scopes, new ArrayList<>());
         }
+        return scopes;
+    }
 
-        // items
-        long[] sizes = new long[width];
-        this.workingItemMatrix = new ArrayList<>();
-        this.itemMatrix = new ArrayList<>();
+    /**
+     * Legt für jeden Wert jedes Parameters ein Item an.
+     *
+     * @return je Parameter die Anzahl seiner Werte
+     */
+    private long[] createItems(SequencedMap<String, ? extends List<?>> parameters) {
+        long[] sizes = new long[parameters.size()];
         int paramIdx = 0;
         for (List<?> values : parameters.values()) {
             List<Item> items = new ArrayList<>();
@@ -494,100 +542,103 @@ public final class AllPairs {
             itemMatrix.add(List.copyOf(items));
             sizes[paramIdx++] = values.size();
         }
-        this.maxUniquePairsExpected = sumOfProducts(sizes, -1, n);
-        for (int i = 0; i < width; i++) {
-            // combinations of this value with n - 1 values of other parameters
-            long combinations = sumOfProducts(sizes, i, n - 1);
-            for (Item item : itemMatrix.get(i)) {
-                item.remaining = combinations;
-            }
-        }
+        return sizes;
+    }
 
-        // constraints
-        this.constraints = List.copyOf(builder.constraints);
-        this.spreadSpentValues = !this.constraints.isEmpty();
-        this.constraintScopes = new int[this.constraints.size()][];
+    /**
+     * Füllt {@link #constraintScopes}, {@link #constraintResults} und {@link #component}.
+     *
+     * @return je Parameter die Indizes der Constraints, die von ihm abhängen
+     */
+    private int[][] indexConstraints(Map<String, Set<Integer>> computedScopes) {
+        int width = component.length;
         List<List<Integer>> ofParameter = new ArrayList<>();
-        this.component = new int[width];
         for (int i = 0; i < width; i++) {
             ofParameter.add(new ArrayList<>());
             component[i] = i;
         }
-        for (int c = 0; c < this.constraints.size(); c++) {
-            Set<Integer> indexes = new TreeSet<>();
-            for (String name : this.constraints.get(c).parameters()) {
-                if (parameterIndex.containsKey(name)) {
-                    indexes.add(parameterIndex.get(name));
-                } else if (computedScopes.containsKey(name)) {
-                    indexes.addAll(computedScopes.get(name));
-                } else {
-                    throw new IllegalArgumentException(
-                            "constraint refers to unknown parameter '" + name + "'");
-                }
-            }
-            int[] scope = indexes.stream().mapToInt(Integer::intValue).toArray();
+        for (int c = 0; c < constraints.size(); c++) {
+            int[] scope = scopeOf(constraints.get(c), computedScopes);
             constraintScopes[c] = scope;
             constraintResults.add(new HashMap<>());
             for (int index : scope) {
                 ofParameter.get(index).add(c);
-                // merge the components of all parameters of this constraint
-                int from = component[index];
-                int to = component[scope[0]];
-                for (int i = 0; from != to && i < width; i++) {
-                    if (component[i] == from) {
-                        component[i] = to;
-                    }
-                }
+                mergeComponents(component[index], component[scope[0]]);
             }
         }
-        this.constraintsOfParameter = new int[width][];
+        int[][] result = new int[width][];
         for (int i = 0; i < width; i++) {
-            constraintsOfParameter[i] =
-                    ofParameter.get(i).stream().mapToInt(Integer::intValue).toArray();
+            result[i] = ofParameter.get(i).stream().mapToInt(Integer::intValue).toArray();
         }
-        this.scratchRow = new Item[width];
+        return result;
+    }
 
-        // distributions
+    /**
+     * Die Indizes der generierten Parameter, von denen der Constraint direkt oder über berechnete
+     * Parameter abhängt, aufsteigend.
+     */
+    private int[] scopeOf(Constraint constraint, Map<String, Set<Integer>> computedScopes) {
+        Set<Integer> indexes = new TreeSet<>();
+        for (String name : constraint.parameters()) {
+            if (parameterIndex.containsKey(name)) {
+                indexes.add(parameterIndex.get(name));
+            } else if (computedScopes.containsKey(name)) {
+                indexes.addAll(computedScopes.get(name));
+            } else {
+                throw new IllegalArgumentException(
+                        "constraint refers to unknown parameter '" + name + "'");
+            }
+        }
+        return indexes.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    /** Parameter eines Constraints können einander beeinflussen: Sie bekommen dieselbe Kennung. */
+    private void mergeComponents(int from, int to) {
+        for (int i = 0; from != to && i < component.length; i++) {
+            if (component[i] == from) {
+                component[i] = to;
+            }
+        }
+    }
+
+    /** Prüft die Verteilungen und füllt {@link #distributions}. */
+    private void resolveDistributions(Builder builder) {
         if (builder.defaultDistribution instanceof Distributions.Preferred
                 || builder.defaultDistribution instanceof Distributions.Weighted) {
             throw new IllegalArgumentException(
                     "a distribution that names values cannot be the default distribution");
         }
-        for (int i = 0; i < width; i++) {
+        for (int i = 0; i < parameterNames.size(); i++) {
             distributions.add(untyped(builder.defaultDistribution));
         }
         for (Map.Entry<String, Distribution<?>> entry : builder.distributions.entrySet()) {
-            int index = parameterNames.indexOf(entry.getKey());
+            String name = entry.getKey();
+            int index = parameterNames.indexOf(name);
             if (index < 0) {
                 throw new IllegalArgumentException(
-                        "distribution refers to unknown parameter '" + entry.getKey() + "'");
+                        "distribution refers to unknown parameter '" + name + "'");
             }
-            if (entry.getValue() instanceof Distributions.Preferred<?> preferred
-                    && !parameters.get(entry.getKey()).contains(preferred.value())) {
-                throw new IllegalArgumentException(
-                        "preferred value '" + preferred.value()
-                                + "' is not a value of parameter '" + entry.getKey() + "'");
-            }
-            if (entry.getValue() instanceof Distributions.Weighted<?> weighted) {
-                for (Object value : weighted.weights.keySet()) {
-                    if (!parameters.get(entry.getKey()).contains(value)) {
-                        throw new IllegalArgumentException(
-                                "weighted value '" + value + "' is not a value of parameter '"
-                                        + entry.getKey() + "'");
-                    }
-                }
-            }
+            checkNamedValues(name, entry.getValue(), builder.parameters.get(name));
             distributions.set(index, untyped(entry.getValue()));
         }
+    }
 
-        propagateInitially();
-        findImpossibleCombinations();
-
-        if (builder.previouslyTested != null) {
-            // Rows that are still complete are registered first, so that the rows that need
-            // completing are filled with values that complement all of them.
-            for (Map<String, ?> row : builder.previouslyTested) {
-                addPreviouslyTested(row);
+    /** Eine Verteilung darf nur Werte nennen, die der Parameter hat. */
+    private static void checkNamedValues(
+            String parameter, Distribution<?> distribution, List<?> values) {
+        if (distribution instanceof Distributions.Preferred<?> preferred
+                && !values.contains(preferred.value())) {
+            throw new IllegalArgumentException(
+                    "preferred value '" + preferred.value() + "' is not a value of parameter '"
+                            + parameter + "'");
+        }
+        if (distribution instanceof Distributions.Weighted<?> weighted) {
+            for (Object value : weighted.weights.keySet()) {
+                if (!values.contains(value)) {
+                    throw new IllegalArgumentException(
+                            "weighted value '" + value + "' is not a value of parameter '"
+                                    + parameter + "'");
+                }
             }
         }
     }
@@ -1001,6 +1052,7 @@ public final class AllPairs {
             }
         }
 
+        /** Die nächste Kombination oder null, wenn alle durchlaufen sind. */
         Item[] next() {
             if (params == null || (started && !advance())) {
                 return null;
@@ -1056,92 +1108,123 @@ public final class AllPairs {
      */
     private List<Item> search(Item[] pinned) {
         BitSet[] domains = domainsFor(pinned);
-        if (domains == null) {
-            return null;
-        }
-        boolean constrained = !constraints.isEmpty();
-        Item[] current = pinned.clone();
-        List<Item> row = Arrays.asList(current);
-        int openCount = 0;
-        for (Item item : pinned) {
-            if (item == null) {
-                openCount++;
-            }
-        }
+        return domains == null ? null : new RowSearch(pinned, domains).run();
+    }
+
+    /** Der Zustand einer Suche nach einem Testfall; siehe {@link #search}. */
+    private final class RowSearch {
+        private final Item[] current;
+        /** Die möglichen Werte jedes Parameters nach den bisherigen Wahlen. */
+        private BitSet[] domains;
 
         // per depth: the parameter chosen there, its candidate values in the order to try them,
         // the candidate being tried, and the domains before any of them was tried
-        int[] variable = new int[openCount];
-        List<List<Item>> candidates = new ArrayList<>(Collections.nCopies(openCount, null));
-        int[] position = new int[openCount];
-        BitSet[][] before = new BitSet[openCount][];
+        private final int[] variable;
+        private final List<List<Item>> candidates;
+        private final int[] position;
+        private final BitSet[][] before;
 
-        int depth = 0;
-        boolean forward = true;
-        while (depth < openCount) {
-            int i;
-            if (forward) {
-                i = nextParameter(current, domains);
-                variable[depth] = i;
-                resortWorkingArray(current, i);
-                List<Item> sorted = workingItemMatrix.get(i);
-                if (constrained) {
-                    List<Item> possible = new ArrayList<>();
-                    for (Item item : sorted) {
-                        if (domains[i].get(item.index)) {
-                            possible.add(item);
-                        }
-                    }
-                    sorted = possible;
+        RowSearch(Item[] pinned, BitSet[] domains) {
+            this.current = pinned.clone();
+            this.domains = domains;
+            int openCount = 0;
+            for (Item item : pinned) {
+                if (item == null) {
+                    openCount++;
                 }
-                candidates.set(depth, sorted);
-                position[depth] = 0;
-                before[depth] = domains;
-            } else {
-                i = variable[depth];
-                position[depth]++;
             }
+            this.variable = new int[openCount];
+            this.candidates = new ArrayList<>(Collections.nCopies(openCount, null));
+            this.position = new int[openCount];
+            this.before = new BitSet[openCount][];
+        }
 
-            boolean placed = false;
-            List<Item> options = candidates.get(depth);
-            while (position[depth] < options.size()) {
-                Item item = options.get(position[depth]);
-                if (constrained) {
-                    BitSet[] narrowed = copyOf(before[depth]);
-                    if (assign(narrowed, item)) {
-                        domains = narrowed;
-                        placed = true;
-                    }
+        /** Der Testfall oder null, wenn kein Testfall die Constraints erfüllt. */
+        List<Item> run() {
+            int depth = 0;
+            boolean forward = true;
+            while (depth >= 0 && depth < variable.length) {
+                if (forward) {
+                    open(depth);
                 } else {
-                    placed = true;
+                    position[depth]++;
                 }
-                if (placed) {
-                    current[i] = item;
-                    break;
-                }
-                position[depth]++;
+                forward = place(depth);
+                depth = forward ? depth + 1 : backtrack(depth);
             }
-            if (placed) {
-                depth++;
-                forward = true;
-                continue;
-            }
+            return depth < 0 ? null : Arrays.asList(current);
+        }
 
-            // dead end: back to the latest choice that can have to do with it
+        /** Wählt den Parameter für diese Tiefe und reiht seine möglichen Werte, den besten zuerst. */
+        private void open(int depth) {
+            int i = nextParameter(current, domains);
+            variable[depth] = i;
+            resortWorkingArray(current, i);
+            List<Item> sorted = workingItemMatrix.get(i);
+            if (!constraints.isEmpty()) {
+                List<Item> possible = new ArrayList<>();
+                for (Item item : sorted) {
+                    if (domains[i].get(item.index)) {
+                        possible.add(item);
+                    }
+                }
+                sorted = possible;
+            }
+            candidates.set(depth, sorted);
+            position[depth] = 0;
+            before[depth] = domains;
+        }
+
+        /**
+         * Gibt dem Parameter dieser Tiefe den nächsten Wert ab {@code position}, den die
+         * Constraints zulassen.
+         *
+         * @return false, wenn es keinen mehr gibt
+         */
+        private boolean place(int depth) {
+            List<Item> options = candidates.get(depth);
+            for (; position[depth] < options.size(); position[depth]++) {
+                Item item = options.get(position[depth]);
+                if (accepts(depth, item)) {
+                    current[variable[depth]] = item;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Propagiert die Wahl von {@code item}; false, wenn sie in eine Sackgasse führt. */
+        private boolean accepts(int depth, Item item) {
+            if (constraints.isEmpty()) {
+                return true;
+            }
+            BitSet[] narrowed = copyOf(before[depth]);
+            if (!assign(narrowed, item)) {
+                return false;
+            }
+            domains = narrowed;
+            return true;
+        }
+
+        /**
+         * Sackgasse: nimmt die Wahlen zurück bis zur letzten, die mit dem Parameter dieser Tiefe
+         * über Constraints verbunden ist.
+         *
+         * @return die Tiefe dieser Wahl, an der es mit dem nächsten Wert weitergeht, oder -1, wenn
+         *     es keine gibt
+         */
+        private int backtrack(int depth) {
+            int stuck = component[variable[depth]];
             int target = depth - 1;
-            while (target >= 0 && component[variable[target]] != component[i]) {
+            while (target >= 0 && component[variable[target]] != stuck) {
                 current[variable[target]] = null;
                 target--;
             }
-            if (target < 0) {
-                return null;
+            if (target >= 0) {
+                current[variable[target]] = null;
             }
-            current[variable[target]] = null;
-            depth = target;
-            forward = false;
+            return target;
         }
-
-        return row;
     }
 
     /** Der offene Parameter, der als nächster gefüllt wird; siehe {@link #search}. */
